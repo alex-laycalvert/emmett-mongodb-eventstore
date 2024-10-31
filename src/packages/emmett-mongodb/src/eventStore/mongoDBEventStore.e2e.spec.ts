@@ -15,7 +15,6 @@ import {
 import {
   getMongoDBEventStore,
   toStreamName,
-  type EventStream,
   type MongoDBEventStore,
 } from './mongoDBEventStore';
 
@@ -34,10 +33,7 @@ void describe('EventStoreDBEventStore', () => {
     });
     await client.connect();
     const db = client.db(DB_NAME);
-    const collection = db.collection<EventStream>(
-      'mongodbeventstore_testing_eventstreams',
-    );
-    eventStore = getMongoDBEventStore(collection);
+    eventStore = getMongoDBEventStore(db);
     return eventStore;
   });
 

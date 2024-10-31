@@ -14,7 +14,7 @@ import {
   type ReadEventMetadata,
   type ExpectedStreamVersion,
 } from '@event-driven-io/emmett';
-import { type Collection, type WithId } from 'mongodb';
+import { type Db, type WithId } from 'mongodb';
 import { v4 as uuid } from 'uuid';
 
 export const MongoDBEventStoreDefaultStreamVersion = 0;
@@ -40,7 +40,7 @@ export type Projection<EventType extends Event> = (
 ) => void | Promise<void>;
 
 export interface EventStream<EventType extends Event = Event> {
-  streamName: string;
+  streamId: string;
   events: Array<ReadEvent<EventType, ReadEventMetadata>>;
   createdAt: Date;
   updatedAt: Date;
@@ -48,29 +48,26 @@ export interface EventStream<EventType extends Event = Event> {
 export type EventStreamEvent<EventType extends Event = Event> =
   EventStream<EventType>['events'][number];
 
-export interface MongoDBConnectionOptions {
-  connectionString: string;
-  database: string;
-  collection?: string;
-}
+const EVENT_STREAM_COLLECTION_SUFFIX = '_eventstreams';
 
 export class MongoDBEventStore implements EventStore<number> {
-  private readonly collection: Collection<EventStream>;
+  private readonly db: Db;
 
-  constructor(collection: typeof this.collection) {
-    this.collection = collection;
+  constructor(db: Db) {
+    this.db = db;
   }
 
   async readStream<EventType extends Event>(
     streamName: StreamName,
     options?: ReadStreamOptions<number>,
   ): Promise<Exclude<ReadStreamResult<EventType, number>, null>> {
+    const { streamId, streamType } = fromStreamName(streamName);
+    const collection = this.getCollection(streamType);
+
     const expectedStreamVersion = options?.expectedStreamVersion;
 
-    const stream = await this.collection.findOne<
-      WithId<EventStream<EventType>>
-    >({
-      streamName: { $eq: streamName },
+    const stream = await collection.findOne<WithId<EventStream<EventType>>>({
+      streamId: { $eq: streamId },
     });
 
     if (!stream) {
@@ -118,21 +115,24 @@ export class MongoDBEventStore implements EventStore<number> {
       projections?: Array<Projection<EventType>>;
     },
   ): Promise<AppendToStreamResult<number>> {
-    let stream = await this.collection.findOne({
-      streamName: { $eq: streamName },
+    const { streamId, streamType } = fromStreamName(streamName);
+    const collection = this.getCollection(streamType);
+    let stream = await collection.findOne({
+      streamId: { $eq: streamId },
     });
+
     let currentStreamPosition = stream?.events.length ?? 0;
     let createdNewStream = false;
 
     if (!stream) {
       const now = new Date();
-      const result = await this.collection.insertOne({
-        streamName,
+      const result = await collection.insertOne({
+        streamId,
         events: [],
         createdAt: now,
         updatedAt: now,
       });
-      stream = await this.collection.findOne({
+      stream = await collection.findOne({
         _id: result.insertedId,
       });
       createdNewStream = true;
@@ -168,9 +168,9 @@ export class MongoDBEventStore implements EventStore<number> {
     // but the collection was instantiated as being `EventStream<Event>`. Unlike `findOne`,
     // `findOneAndUpdate` does not allow a generic to override what the return type is.
     const updatedStream: WithId<EventStream<EventType>> | null =
-      await this.collection.findOneAndUpdate(
+      await collection.findOneAndUpdate(
         {
-          streamName: { $eq: streamName },
+          streamId: { $eq: streamId },
           events: { $size: stream.events.length },
         },
         {
@@ -181,16 +181,14 @@ export class MongoDBEventStore implements EventStore<number> {
       );
 
     if (!updatedStream) {
-      const currentStream = await this.collection.findOne({
-        streamName: { $eq: streamName },
+      const currentStream = await collection.findOne({
+        streamId: { $eq: streamId },
       });
       throw new ExpectedVersionConflictError(
-        currentStream?.events.length ?? -1,
+        currentStream?.events.length ?? MongoDBEventStoreDefaultStreamVersion,
         stream.events.length,
       );
     }
-
-    const { streamType, streamId } = fromStreamName(streamName);
 
     await executeProjections(
       {
@@ -208,10 +206,16 @@ export class MongoDBEventStore implements EventStore<number> {
       createdNewStream,
     };
   }
+
+  private getCollection(streamType: StreamType) {
+    return this.db.collection<EventStream>(
+      streamType + EVENT_STREAM_COLLECTION_SUFFIX,
+    );
+  }
 }
 
-export const getMongoDBEventStore = (collection: Collection<EventStream>) => {
-  const eventStore = new MongoDBEventStore(collection);
+export const getMongoDBEventStore = (db: Db) => {
+  const eventStore = new MongoDBEventStore(db);
   return eventStore;
 };
 
